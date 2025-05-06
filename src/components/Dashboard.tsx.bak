@@ -1,0 +1,837 @@
+import React, { useEffect, useState } from "react";
+import {
+  getDashboardStats,
+  getLicenses,
+  getProducers,
+} from "../services/dataService.js";
+import { getLicenseFee } from "../utils/stateLicenseCosts.js";
+import {
+  Chart as ChartJS,
+  ArcElement,
+  Tooltip,
+  Legend,
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  Title,
+  PointElement,
+  LineElement,
+  RadialLinearScale,
+  Filler,
+} from "chart.js";
+import { Doughnut, Bar, PolarArea, Line } from "react-chartjs-2";
+import {
+  FaChartPie,
+  FaChartBar,
+  FaDollarSign,
+  FaMapMarkerAlt,
+  FaChartLine,
+} from "react-icons/fa";
+import { BsBarChartFill } from "react-icons/bs";
+
+// Register Chart.js components
+ChartJS.register(
+  ArcElement,
+  Tooltip,
+  Legend,
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  Title,
+  PointElement,
+  LineElement,
+  RadialLinearScale,
+  Filler
+);
+
+interface DashboardStats {
+  totalLicenses: number;
+  expiringSoon: number;
+  expired: number;
+  active: number;
+  byLocation: Record<string, number>;
+}
+
+interface StateBreakdown {
+  state: string;
+  count: number;
+  cost: number;
+}
+
+const Dashboard: React.FC = () => {
+  const [stats, setStats] = useState<DashboardStats>({
+    totalLicenses: 0,
+    expiringSoon: 0,
+    expired: 0,
+    active: 0,
+    byLocation: {
+      Austin: 0,
+      Charlotte: 0,
+    },
+  });
+
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
+  const [totalLicenseCost, setTotalLicenseCost] = useState<number>(0);
+  const [producerCount, setProducerCount] = useState<number>(0);
+  const [stateBreakdown, setStateBreakdown] = useState<StateBreakdown[]>([]);
+  const [locationBreakdown, setLocationBreakdown] = useState<{
+    [key: string]: { active: number; expiring: number; expired: number };
+  }>({
+    Austin: { active: 0, expiring: 0, expired: 0 },
+    Charlotte: { active: 0, expiring: 0, expired: 0 },
+    Unknown: { active: 0, expiring: 0, expired: 0 },
+  });
+  const [licenseTypeData, setLicenseTypeData] = useState<{
+    [key: string]: number;
+  }>({});
+  const [trendData, setTrendData] = useState<{
+    labels: string[];
+    active: number[];
+    expiring: number[];
+    expired: number[];
+  }>({
+    labels: [],
+    active: [],
+    expiring: [],
+    expired: [],
+  });
+
+  useEffect(() => {
+    const fetchStats = async () => {
+      try {
+        setLoading(true);
+        const data = await getDashboardStats();
+        setStats(data);
+
+        // Get producer count
+        const producers = await getProducers();
+        setProducerCount(producers.length);
+
+        // Calculate total licensing costs and create state breakdown
+        const licenses = await getLicenses();
+        let totalCost = 0;
+
+        // Calculate state breakdown
+        const stateStats: { [key: string]: { count: number; cost: number } } =
+          {};
+        const locationStats: {
+          [key: string]: { active: number; expiring: number; expired: number };
+        } = {
+          Austin: { active: 0, expiring: 0, expired: 0 },
+          Charlotte: { active: 0, expiring: 0, expired: 0 },
+          Unknown: { active: 0, expiring: 0, expired: 0 },
+        };
+
+        // Find the producer for each license
+        const producersMap = producers.reduce(
+          (acc: { [key: string]: any }, producer) => {
+            acc[producer.id!] = producer;
+            return acc;
+          },
+          {}
+        );
+
+        // Process each license
+        licenses.forEach((license) => {
+          // Calculate fee and add to total
+          const fee = getLicenseFee(license.state);
+          totalCost += fee;
+
+          // Add to state breakdown
+          if (!stateStats[license.state]) {
+            stateStats[license.state] = { count: 0, cost: 0 };
+          }
+          stateStats[license.state].count += 1;
+          stateStats[license.state].cost += fee;
+
+          // Add to location breakdown
+          const producer = producersMap[license.producerId];
+          const location = producer?.location || "Unknown";
+
+          if (!locationStats[location]) {
+            locationStats[location] = { active: 0, expiring: 0, expired: 0 };
+          }
+
+          if (license.status === "expired") {
+            locationStats[location].expired += 1;
+          } else if (license.status === "expiring") {
+            locationStats[location].expiring += 1;
+          } else {
+            locationStats[location].active += 1;
+          }
+        });
+
+        // Convert state stats to sorted array
+        const stateBreakdownArray = Object.entries(stateStats)
+          .map(([state, data]) => ({
+            state,
+            count: data.count,
+            cost: data.cost,
+          }))
+          .sort((a, b) => b.count - a.count);
+
+        setStateBreakdown(stateBreakdownArray);
+        setLocationBreakdown(locationStats);
+        setTotalLicenseCost(totalCost);
+
+        // Calculate license types distribution
+        const licenseTypeCounts: { [key: string]: number } = {};
+        licenses.forEach((license) => {
+          if (!licenseTypeCounts[license.type]) {
+            licenseTypeCounts[license.type] = 0;
+          }
+          licenseTypeCounts[license.type]++;
+        });
+        setLicenseTypeData(licenseTypeCounts);
+
+        // Generate trend data (simulated for now)
+        // In a real app, you'd fetch historical data from the database
+        const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun"];
+        const active = months.map((_, i) =>
+          Math.round(stats.active * (0.7 + i * 0.05))
+        );
+        const expiring = months.map((_, i) =>
+          Math.round(stats.expiringSoon * (0.8 + i * 0.04))
+        );
+        const expired = months.map((_, i) =>
+          Math.round(stats.expired * (0.9 + i * 0.02))
+        );
+
+        setTrendData({
+          labels: months,
+          active,
+          expiring,
+          expired,
+        });
+      } catch (err) {
+        console.error("Error fetching dashboard stats:", err);
+        setError("Failed to load dashboard statistics");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchStats();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="p-4">
+        <h2 className="text-2xl font-bold mb-4">Dashboard</h2>
+        <div className="text-center py-10">
+          <p className="text-gray-500">Loading dashboard data...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="p-4">
+        <h2 className="text-2xl font-bold mb-4">Dashboard</h2>
+        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
+          <p>{error}</p>
+          <p className="text-sm">Using placeholder data instead</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Calculate percentages for the donut chart
+  const activePercent =
+    Math.round((stats.active / stats.totalLicenses) * 100) || 0;
+  const expiringPercent =
+    Math.round((stats.expiringSoon / stats.totalLicenses) * 100) || 0;
+  const expiredPercent =
+    Math.round((stats.expired / stats.totalLicenses) * 100) || 0;
+
+  return (
+    <div className="p-4">
+      <h2 className="text-2xl font-bold mb-6">License Dashboard</h2>
+
+      {/* Summary Cards in one row */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+        <div
+          className="card bg-white border border-gray-200 shadow-sm"
+          style={{ minWidth: "170px" }}
+        >
+          <h3 className="form-label text-gray-700">Total Licenses</h3>
+          <p className="text-2xl font-bold">{stats.totalLicenses}</p>
+          <p className="text-sm text-gray-500 mt-2">
+            Across {producerCount} producers
+          </p>
+        </div>
+
+        <div
+          className="card border border-green-200"
+          style={{ backgroundColor: "#f0fdf4", minWidth: "170px" }}
+        >
+          <h3 className="form-label text-green-700">Active</h3>
+          <p className="text-2xl font-bold text-green-800">{stats.active}</p>
+          <p className="text-sm text-green-600 mt-2">
+            {activePercent}% of total
+          </p>
+        </div>
+
+        <div
+          className="card border border-yellow-200"
+          style={{ backgroundColor: "#fefce8", minWidth: "170px" }}
+        >
+          <h3 className="form-label text-yellow-700">Expiring Soon</h3>
+          <p className="text-2xl font-bold text-yellow-800">
+            {stats.expiringSoon}
+          </p>
+          <p className="text-sm text-yellow-600 mt-2">Within next 30 days</p>
+        </div>
+
+        <div
+          className="card border border-red-200"
+          style={{ backgroundColor: "#fef2f2", minWidth: "170px" }}
+        >
+          <h3 className="form-label text-red-700">Expired</h3>
+          <p className="text-2xl font-bold text-red-800">{stats.expired}</p>
+          <p className="text-sm text-red-600 mt-2">Need immediate renewal</p>
+        </div>
+      </div>
+
+      {/* Section: License Status Overview */}
+      <div className="mb-6">
+        <h3 className="text-xl font-bold mb-4 px-1 border-l-4 border-indigo-500 pl-2">
+          License Status Overview
+        </h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+          {/* License Distribution Visual */}
+          <div className="card">
+            <div className="flex items-center mb-4">
+              <FaChartPie className="text-indigo-500 mr-2" />
+              <h3 className="text-lg font-semibold">Status Distribution</h3>
+            </div>
+            <div className="flex flex-col md:flex-row items-center justify-center mb-4">
+              <div className="w-48 h-48 mx-auto md:mx-0">
+                <Doughnut
+                  data={{
+                    labels: ["Active", "Expiring Soon", "Expired"],
+                    datasets: [
+                      {
+                        data: [stats.active, stats.expiringSoon, stats.expired],
+                        backgroundColor: ["#10B981", "#F59E0B", "#EF4444"],
+                        borderColor: ["#059669", "#D97706", "#DC2626"],
+                        borderWidth: 1,
+                        hoverOffset: 4,
+                      },
+                    ],
+                  }}
+                  options={{
+                    plugins: {
+                      legend: {
+                        position: "bottom",
+                        labels: {
+                          usePointStyle: true,
+                          padding: 20,
+                        },
+                      },
+                      tooltip: {
+                        callbacks: {
+                          label: function (context) {
+                            const label = context.label || "";
+                            const value = context.raw || 0;
+                            const total = stats.totalLicenses;
+                            const percentage = Math.round(
+                              (value / total) * 100
+                            );
+                            return `${label}: ${value} (${percentage}%)`;
+                          },
+                        },
+                      },
+                    },
+                    cutout: "70%",
+                  }}
+                />
+              </div>
+              <div className="mt-4 md:mt-0 md:ml-8 flex flex-col gap-3">
+                <div className="flex items-center">
+                  <div className="w-4 h-4 rounded-full bg-green-500 mr-2"></div>
+                  <div>
+                    <div className="font-semibold">Active</div>
+                    <div className="text-sm text-gray-500">
+                      {stats.active} ({activePercent}%)
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center">
+                  <div className="w-4 h-4 rounded-full bg-yellow-500 mr-2"></div>
+                  <div>
+                    <div className="font-semibold">Expiring Soon</div>
+                    <div className="text-sm text-gray-500">
+                      {stats.expiringSoon} ({expiringPercent}%)
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center">
+                  <div className="w-4 h-4 rounded-full bg-red-500 mr-2"></div>
+                  <div>
+                    <div className="font-semibold">Expired</div>
+                    <div className="text-sm text-gray-500">
+                      {stats.expired} ({expiredPercent}%)
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* License Type Distribution */}
+          <div className="card">
+            <div className="flex items-center mb-4">
+              <BsBarChartFill className="text-purple-500 mr-2" />
+              <h3 className="text-lg font-semibold">
+                License Type Distribution
+              </h3>
+            </div>
+            <div className="h-64 flex items-center justify-center">
+              {Object.keys(licenseTypeData).length > 0 ? (
+                <PolarArea
+                  data={{
+                    labels: Object.keys(licenseTypeData),
+                    datasets: [
+                      {
+                        data: Object.values(licenseTypeData),
+                        backgroundColor: [
+                          "rgba(54, 162, 235, 0.6)",
+                          "rgba(255, 99, 132, 0.6)",
+                          "rgba(255, 206, 86, 0.6)",
+                          "rgba(75, 192, 192, 0.6)",
+                          "rgba(153, 102, 255, 0.6)",
+                          "rgba(255, 159, 64, 0.6)",
+                        ],
+                        borderWidth: 1,
+                      },
+                    ],
+                  }}
+                  options={{
+                    maintainAspectRatio: false,
+                    plugins: {
+                      legend: {
+                        position: "right",
+                        labels: {
+                          boxWidth: 10,
+                          font: {
+                            size: 11,
+                          },
+                        },
+                      },
+                      tooltip: {
+                        callbacks: {
+                          label: function (context) {
+                            const label = context.label || "";
+                            const value = context.raw || 0;
+                            const total = Object.values(licenseTypeData).reduce(
+                              (sum, val) => sum + val,
+                              0
+                            );
+                            const percentage = Math.round(
+                              (value / total) * 100
+                            );
+                            return `${label}: ${value} (${percentage}%)`;
+                          },
+                        },
+                      },
+                    },
+                  }}
+                />
+              ) : (
+                <p className="text-gray-500">No license type data available</p>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Section: Location Analysis */}
+      <div className="mb-6">
+        <h3 className="text-xl font-bold mb-4 px-1 border-l-4 border-purple-500 pl-2">
+          License Status by Location
+        </h3>
+        {/* Enhanced Location Breakdown with better bar charts */}
+        <div className="card mb-4">
+          <div className="space-y-6">
+            {Object.entries(locationBreakdown).map(([location, counts]) => {
+              if (counts.active + counts.expiring + counts.expired === 0)
+                return null;
+              const total = counts.active + counts.expiring + counts.expired;
+              const activeWidth = (counts.active / total) * 100;
+              const expiringWidth = (counts.expiring / total) * 100;
+              const expiredWidth = (counts.expired / total) * 100;
+
+              return (
+                <div
+                  key={location}
+                  className="py-2 px-1 hover:bg-gray-50 rounded-lg transition-colors"
+                >
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="font-medium text-md flex items-center">
+                      <span
+                        className={`inline-block w-2 h-2 rounded-full mr-2 ${
+                          location === "Austin"
+                            ? "bg-blue-500"
+                            : location === "Charlotte"
+                            ? "bg-purple-500"
+                            : "bg-gray-500"
+                        }`}
+                      ></span>
+                      {location}
+                    </span>
+                    <span className="text-sm text-gray-600 font-semibold">
+                      {total} licenses
+                    </span>
+                  </div>
+                  <div className="w-full h-8 bg-gray-100 rounded-lg overflow-hidden shadow-inner">
+                    <div
+                      className="h-full bg-green-500 float-left relative group transition-all hover:opacity-90 cursor-pointer"
+                      style={{ width: `${activeWidth}%` }}
+                    >
+                      {activeWidth > 15 && (
+                        <span className="absolute inset-0 flex items-center justify-center text-white text-xs font-medium">
+                          {counts.active}
+                        </span>
+                      )}
+                      <span className="absolute opacity-0 group-hover:opacity-100 bg-black bg-opacity-80 text-white p-1 rounded text-xs -top-8 left-1/2 transform -translate-x-1/2 transition-opacity">
+                        {counts.active} Active ({Math.round(activeWidth)}%)
+                      </span>
+                    </div>
+                    <div
+                      className="h-full bg-yellow-500 float-left relative group transition-all hover:opacity-90 cursor-pointer"
+                      style={{ width: `${expiringWidth}%` }}
+                    >
+                      {expiringWidth > 15 && (
+                        <span className="absolute inset-0 flex items-center justify-center text-white text-xs font-medium">
+                          {counts.expiring}
+                        </span>
+                      )}
+                      <span className="absolute opacity-0 group-hover:opacity-100 bg-black bg-opacity-80 text-white p-1 rounded text-xs -top-8 left-1/2 transform -translate-x-1/2 transition-opacity">
+                        {counts.expiring} Expiring ({Math.round(expiringWidth)}
+                        %)
+                      </span>
+                    </div>
+                    <div
+                      className="h-full bg-red-500 float-left relative group transition-all hover:opacity-90 cursor-pointer"
+                      style={{ width: `${expiredWidth}%` }}
+                    >
+                      {expiredWidth > 15 && (
+                        <span className="absolute inset-0 flex items-center justify-center text-white text-xs font-medium">
+                          {counts.expired}
+                        </span>
+                      )}
+                      <span className="absolute opacity-0 group-hover:opacity-100 bg-black bg-opacity-80 text-white p-1 rounded text-xs -top-8 left-1/2 transform -translate-x-1/2 transition-opacity">
+                        {counts.expired} Expired ({Math.round(expiredWidth)}%)
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex justify-between text-xs mt-1">
+                    <span className="flex items-center">
+                      <span className="inline-block w-3 h-3 mr-1 bg-green-500 rounded-sm"></span>
+                      Active: {counts.active} ({Math.round(activeWidth)}%)
+                    </span>
+                    <span className="flex items-center">
+                      <span className="inline-block w-3 h-3 mr-1 bg-yellow-500 rounded-sm"></span>
+                      Expiring: {counts.expiring} ({Math.round(expiringWidth)}%)
+                    </span>
+                    <span className="flex items-center">
+                      <span className="inline-block w-3 h-3 mr-1 bg-red-500 rounded-sm"></span>
+                      Expired: {counts.expired} ({Math.round(expiredWidth)}%)
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Trend Analysis */}
+        <div className="card">
+          <div className="flex items-center mb-4">
+            <FaChartLine className="text-blue-500 mr-2" />
+            <h3 className="text-lg font-semibold">License Status Trends</h3>
+          </div>
+          <div className="h-64">
+            <Line
+              data={{
+                labels: trendData.labels,
+                datasets: [
+                  {
+                    label: "Active",
+                    data: trendData.active,
+                    borderColor: "#10B981",
+                    backgroundColor: "rgba(16, 185, 129, 0.1)",
+                    tension: 0.3,
+                    fill: true,
+                  },
+                  {
+                    label: "Expiring Soon",
+                    data: trendData.expiring,
+                    borderColor: "#F59E0B",
+                    backgroundColor: "rgba(245, 158, 11, 0.1)",
+                    tension: 0.3,
+                    fill: true,
+                  },
+                  {
+                    label: "Expired",
+                    data: trendData.expired,
+                    borderColor: "#EF4444",
+                    backgroundColor: "rgba(239, 68, 68, 0.1)",
+                    tension: 0.3,
+                    fill: true,
+                  },
+                ],
+              }}
+              options={{
+                maintainAspectRatio: false,
+                plugins: {
+                  legend: {
+                    position: "top",
+                  },
+                  tooltip: {
+                    mode: "index",
+                    intersect: false,
+                  },
+                },
+                scales: {
+                  y: {
+                    beginAtZero: true,
+                    title: {
+                      display: true,
+                      text: "Number of Licenses",
+                    },
+                  },
+                  x: {
+                    title: {
+                      display: true,
+                      text: "Month",
+                    },
+                  },
+                },
+              }}
+            />
+          </div>
+          <div className="text-xs text-gray-500 mt-2 text-center">
+            License status trends over the past 6 months
+          </div>
+        </div>
+      </div>
+
+      {/* Section: Financial Analysis */}
+      <div className="mb-6">
+        <h3 className="text-xl font-bold mb-4 px-1 border-l-4 border-green-500 pl-2">
+          Financial & State Analysis
+        </h3>
+        {/* States and Cost Analysis */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="card">
+            <div className="flex items-center mb-4">
+              <FaChartBar className="text-blue-500 mr-2" />
+              <h3 className="text-lg font-semibold">
+                Top 10 States by License Count
+              </h3>
+            </div>
+
+            {stateBreakdown.length > 0 ? (
+              <div className="h-[300px] w-full">
+                <Bar
+                  data={{
+                    labels: stateBreakdown
+                      .slice(0, 10)
+                      .map((item) => item.state),
+                    datasets: [
+                      {
+                        label: "Licenses",
+                        data: stateBreakdown
+                          .slice(0, 10)
+                          .map((item) => item.count),
+                        backgroundColor: "rgba(59, 130, 246, 0.6)",
+                        borderColor: "rgba(59, 130, 246, 1)",
+                        borderWidth: 1,
+                      },
+                      {
+                        label: "Cost ($)",
+                        data: stateBreakdown
+                          .slice(0, 10)
+                          .map((item) => item.cost / 100), // Scaled for better visualization
+                        backgroundColor: "rgba(16, 185, 129, 0.6)",
+                        borderColor: "rgba(16, 185, 129, 1)",
+                        borderWidth: 1,
+                        yAxisID: "y1",
+                      },
+                    ],
+                  }}
+                  options={{
+                    maintainAspectRatio: false,
+                    scales: {
+                      y: {
+                        beginAtZero: true,
+                        title: {
+                          display: true,
+                          text: "License Count",
+                        },
+                      },
+                      y1: {
+                        beginAtZero: true,
+                        position: "right",
+                        title: {
+                          display: true,
+                          text: "Cost (hundreds)",
+                        },
+                        grid: {
+                          drawOnChartArea: false,
+                        },
+                      },
+                      x: {
+                        title: {
+                          display: true,
+                          text: "State",
+                        },
+                      },
+                    },
+                    plugins: {
+                      legend: {
+                        position: "top",
+                      },
+                      tooltip: {
+                        callbacks: {
+                          label: function (context) {
+                            const label = context.dataset.label || "";
+                            if (label === "Cost ($)") {
+                              return `${label}: $${context.parsed.y * 100}`;
+                            }
+                            return `${label}: ${context.parsed.y}`;
+                          },
+                        },
+                      },
+                    },
+                  }}
+                />
+              </div>
+            ) : (
+              <p className="text-gray-500 text-center py-4">
+                No state data available
+              </p>
+            )}
+
+            <div className="text-right text-sm text-gray-500 mt-2">
+              Showing {Math.min(10, stateBreakdown.length)} of{" "}
+              {stateBreakdown.length} states
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="flex items-center mb-4">
+              <FaDollarSign className="text-green-500 mr-2" />
+              <h3 className="text-lg font-semibold">License Cost Analysis</h3>
+            </div>
+
+            {stats.totalLicenses === 0 ? (
+              <p className="text-gray-500">No license data available</p>
+            ) : (
+              <div>
+                <div className="mb-6 p-4 bg-green-50 rounded-lg border border-green-100">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="font-medium text-green-800">
+                      Total Annual Cost
+                    </span>
+                    <span className="font-semibold text-green-700 text-lg">
+                      ${totalLicenseCost.toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="w-full h-6 bg-white rounded-full overflow-hidden shadow-inner">
+                    <div
+                      className="h-full bg-green-500 rounded-full transition-all relative flex items-center justify-center"
+                      style={{ width: "100%" }}
+                    >
+                      <span className="text-white text-xs font-medium z-10">
+                        ${totalLicenseCost.toLocaleString()}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-4">
+                  <div className="bg-blue-50 p-4 rounded-lg border border-blue-100">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="font-medium text-blue-800">
+                        Average Cost per License
+                      </span>
+                      <span className="font-medium text-blue-700">
+                        $
+                        {stats.totalLicenses > 0
+                          ? (totalLicenseCost / stats.totalLicenses).toFixed(2)
+                          : 0}
+                      </span>
+                    </div>
+                    <div className="w-full h-2 bg-white rounded-full">
+                      <div
+                        className="h-full bg-blue-500 rounded-full"
+                        style={{
+                          width: stats.totalLicenses > 0 ? "100%" : "0%",
+                        }}
+                      ></div>
+                    </div>
+                  </div>
+
+                  <div className="bg-indigo-50 p-4 rounded-lg border border-indigo-100">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="font-medium text-indigo-800">
+                        Average Cost per Producer
+                      </span>
+                      <span className="font-medium text-indigo-700">
+                        $
+                        {producerCount > 0
+                          ? (totalLicenseCost / producerCount).toFixed(2)
+                          : 0}
+                      </span>
+                    </div>
+                    <div className="w-full h-2 bg-white rounded-full">
+                      <div
+                        className="h-full bg-indigo-500 rounded-full"
+                        style={{ width: producerCount > 0 ? "100%" : "0%" }}
+                      ></div>
+                    </div>
+                  </div>
+
+                  <div className="bg-purple-50 p-4 rounded-lg border border-purple-100">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="font-medium text-purple-800">
+                        Average Licenses per Producer
+                      </span>
+                      <span className="font-medium text-purple-700">
+                        {producerCount > 0
+                          ? (stats.totalLicenses / producerCount).toFixed(1)
+                          : 0}
+                      </span>
+                    </div>
+                    <div className="w-full h-2 bg-white rounded-full">
+                      <div
+                        className="h-full bg-purple-500 rounded-full"
+                        style={{
+                          width:
+                            producerCount > 0
+                              ? `${Math.min(
+                                  (stats.totalLicenses / producerCount / 5) *
+                                    100,
+                                  100
+                                )}%`
+                              : "0%",
+                        }}
+                      ></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Dashboard;
