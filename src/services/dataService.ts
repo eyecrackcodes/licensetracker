@@ -1,11 +1,13 @@
 import { database } from "../firebase";
 import { ref, set, get, push, remove, update, child } from "firebase/database";
+import { fetchProducerLicensesBySSN, fetchProducerLicensesByNPN, convertSureLcLicense, SureLcLicense } from "../utils/sureLcApi";
 
 // Types
 export interface Producer {
   id?: string;
   name: string;
   npn: string; // National Producer Number
+  ssn?: string; // Social Security Number (for SureLC API)
   location: string;
   email?: string;
   phone?: string;
@@ -196,4 +198,184 @@ export const getDashboardStats = async () => {
     active,
     byLocation,
   };
+};
+
+// SureLC License synchronization
+export const syncLicensesFromSureLC = async (producerId: string): Promise<{
+  updated: number;
+  added: number;
+  errors: string[];
+}> => {
+  const result = {
+    updated: 0,
+    added: 0,
+    errors: [] as string[],
+  };
+
+  try {
+    // Get producer details
+    const producerSnap = await get(ref(database, `producers/${producerId}`));
+    if (!producerSnap.exists()) {
+      result.errors.push(`Producer with ID ${producerId} not found`);
+      return result;
+    }
+
+    const producer = producerSnap.val() as Producer;
+    
+    // Check if producer has SSN (preferred) or NPN
+    if (!producer.ssn && !producer.npn) {
+      result.errors.push(`Producer ${producer.name} does not have SSN or NPN`);
+      return result;
+    }
+
+    // Try to fetch licenses using SSN first (preferred method based on testing)
+    let sureLcLicenses: SureLcLicense[] = [];
+    if (producer.ssn) {
+      try {
+        sureLcLicenses = await fetchProducerLicensesBySSN(producer.ssn);
+      } catch (ssnError) {
+        console.warn(`Failed to fetch licenses by SSN for ${producer.name}:`, ssnError);
+        result.errors.push(`Failed to fetch licenses by SSN: ${ssnError instanceof Error ? ssnError.message : String(ssnError)}`);
+        
+        // Fall back to NPN if SSN fails and NPN is available
+        if (producer.npn) {
+          try {
+            sureLcLicenses = await fetchProducerLicensesByNPN(producer.npn);
+          } catch (npnError) {
+            console.error(`Failed to fetch licenses by NPN for ${producer.name}:`, npnError);
+            result.errors.push(`Failed to fetch licenses by NPN: ${npnError instanceof Error ? npnError.message : String(npnError)}`);
+          }
+        }
+      }
+    } 
+    // Try NPN if SSN is not available
+    else if (producer.npn) {
+      try {
+        sureLcLicenses = await fetchProducerLicensesByNPN(producer.npn);
+      } catch (npnError) {
+        console.error(`Failed to fetch licenses by NPN for ${producer.name}:`, npnError);
+        result.errors.push(`Failed to fetch licenses by NPN: ${npnError instanceof Error ? npnError.message : String(npnError)}`);
+      }
+    }
+    
+    if (!sureLcLicenses || sureLcLicenses.length === 0) {
+      result.errors.push(`No licenses found for producer ${producer.name}`);
+      return result;
+    }
+
+    // Get existing licenses for this producer
+    const licensesSnapshot = await get(ref(database, "licenses"));
+    const existingLicenses: Record<string, License> = {};
+    
+    if (licensesSnapshot.exists()) {
+      licensesSnapshot.forEach((childSnapshot) => {
+        const license = childSnapshot.val() as License;
+        if (license.producerId === producerId) {
+          // Create a key using state to match with SureLC licenses
+          const key = license.state;
+          existingLicenses[key] = {
+            ...license,
+            id: childSnapshot.key
+          };
+        }
+      });
+    }
+
+    // Process each SureLC license
+    for (const sureLcLicense of sureLcLicenses) {
+      const licenseData = convertSureLcLicense(
+        sureLcLicense, 
+        producerId, 
+        producer.name
+      );
+
+      // Check if we already have a license for this state
+      const existingLicense = existingLicenses[sureLcLicense.state];
+
+      if (existingLicense) {
+        // Update existing license
+        await update(ref(database, `licenses/${existingLicense.id}`), licenseData);
+        result.updated++;
+      } else {
+        // Create new license
+        const newLicenseRef = push(ref(database, "licenses"));
+        const licenseId = newLicenseRef.key as string;
+        await set(newLicenseRef, {
+          ...licenseData,
+          id: licenseId,
+        });
+        result.added++;
+      }
+    }
+
+    return result;
+  } catch (error) {
+    console.error("Error syncing licenses from SureLC:", error);
+    result.errors.push(`General error: ${error instanceof Error ? error.message : String(error)}`);
+    return result;
+  }
+};
+
+// Sync licenses for all producers
+export const syncAllProducersLicenses = async (): Promise<{
+  producersProcessed: number;
+  licensesUpdated: number;
+  licensesAdded: number;
+  errors: string[];
+}> => {
+  const result = {
+    producersProcessed: 0,
+    licensesUpdated: 0,
+    licensesAdded: 0,
+    errors: [] as string[],
+  };
+
+  try {
+    // Get all producers with NPNs
+    const producersSnapshot = await get(ref(database, "producers"));
+    
+    if (!producersSnapshot.exists()) {
+      result.errors.push("No producers found in database");
+      return result;
+    }
+
+    // Process each producer
+    const producers: Producer[] = [];
+    producersSnapshot.forEach((childSnapshot) => {
+      producers.push({
+        id: childSnapshot.key,
+        ...childSnapshot.val()
+      } as Producer);
+    });
+
+    const producersWithNpn = producers.filter(p => p.npn && p.id);
+    
+    if (producersWithNpn.length === 0) {
+      result.errors.push("No producers with NPN found");
+      return result;
+    }
+
+    // Process each producer
+    for (const producer of producersWithNpn) {
+      if (!producer.id) continue;
+      
+      const syncResult = await syncLicensesFromSureLC(producer.id);
+      
+      result.producersProcessed++;
+      result.licensesUpdated += syncResult.updated;
+      result.licensesAdded += syncResult.added;
+      
+      // Add producer-specific errors
+      if (syncResult.errors.length > 0) {
+        result.errors.push(`Errors for producer ${producer.name}:`);
+        result.errors.push(...syncResult.errors.map(err => `  - ${err}`));
+      }
+    }
+
+    return result;
+  } catch (error) {
+    console.error("Error syncing all producers:", error);
+    result.errors.push(`General error: ${error instanceof Error ? error.message : String(error)}`);
+    return result;
+  }
 };
